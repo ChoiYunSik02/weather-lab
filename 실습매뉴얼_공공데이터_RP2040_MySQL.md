@@ -1126,6 +1126,12 @@ def load_joined() -> pd.DataFrame:
     source = os.getenv("WEATHER_SOURCE", "public")
     df = pd.read_sql(sql, conn, params=(device, source))
     conn.close()
+    # 공공 ASOS: solar_radiation 미제공·강수 결측 등 → NaN이면 sklearn/LSTM 깨짐
+    for col in FEATURES:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["solar_radiation"] = df["solar_radiation"].fillna(0.0)
+    df["precipitation"] = df["precipitation"].fillna(0.0)
+    df[FEATURES] = df[FEATURES].ffill().bfill().fillna(0.0)
     return df
 
 
@@ -1179,6 +1185,8 @@ def load_baseline_metrics() -> dict | None:
 ```
 
 **확인:** 파일 저장 후 15절로.
+
+**공공 API (`WEATHER_SOURCE=public`)** — `solar_radiation`이 NULL·`precipitation`에 NaN이 있어도, `load_joined`에서 숫자 변환 후 **일사·강수는 0**, 나머지는 **앞뒤 시간으로 보간**한다. 15·16절이 NaN 없이 돌아가야 한다.
 
 ---
 
@@ -1375,7 +1383,8 @@ weather-lab/     ← git clone
 | `weather_hourly` 720 미만 | 11절 `collect_weather_backfill.py 30` |
 | Open-Meteo 오류 | `LAT`/`LON`, archive 날짜 범위 |
 | 공공 API 오류 | 활용신청, `dateCd=HR`, Decoding 키 |
-| `solar_radiation` NULL | `public`(ASOS) 기본이면 정상. 일사 필요 시 `WEATHER_SOURCE=openmeteo` 로 전환 |
+| `solar_radiation` NULL | `public`(ASOS)에서 흔함 — 14절 `load_joined`가 0·ffill 처리. 일사 실측 필요 시 `openmeteo` |
+| sklearn/LSTM NaN 오류 | 14절 `load_joined` 결측 처리 확인, backfill·시드 후 `train_baseline` 재실행 |
 | join 행 적음 | 5절 시드, `DEVICE_ID`, `source` 필터 |
 | `power_hourly` ≠ 720 | 5절 SQL import 경로 |
 | Modbus 연결 실패 | `MODBUS_MODE`·RTU: COM 번호 / TCP: Host·Port·에뮬 Listen |
