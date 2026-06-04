@@ -44,13 +44,14 @@ PowerShell에서 **위에서 아래 순서대로** 진행한다.
 Open-Meteo(또는 공공 API)  →  weather_hourly   (1시간 1행)
 RP2040 Modbus + 시드 SQL  →  power_realtime  →  power_hourly (뷰)
         ↓ join (시간 맞춤)
-train_baseline.py  →  발전량 예측 (비교용)
-lstm_train.py      →  과거 35시간 × 8 feature → LSTM
+train_baseline.py  →  **다음 1시간** power_kw (시각 t 의 8 feature)
+lstm_train.py      →  **과거 35시간** × 8 feature → power_kw (LSTM)
 ```
 
 - **시간 단위** 데이터만 사용한다 (1시간 1행).
 - 기본 기상 소스: **`WEATHER_SOURCE=public`** (공공데이터포털 ASOS, **군산 108**). Open-Meteo는 선택.
-- LSTM 입력: **35시간 × 8개 feature**, 데이터 길이 목표 **약 720시간(30일)**.
+- **베이스라인:** 시각 **t** 의 8 feature(현재 `power_kw` 포함) → 시각 **t+1** `power_kw`.
+- **LSTM:** 과거 **35시간** × 8 feature → 다음 `power_kw`. 데이터 길이 목표 **약 720시간(30일)**.
 
 ### 0.2 완료 체크리스트
 
@@ -918,7 +919,8 @@ def create_modbus_client():
 
 
 def read_measurements(client, slave_id: int):
-    rr = client.read_holding_registers(address=0, count=3, slave=slave_id)
+    # pymodbus 3.x: 첫 인자=주소, slave= → device_id=
+    rr = client.read_holding_registers(0, count=3, device_id=slave_id)
     if rr.isError():
         raise RuntimeError(f"Modbus read error: {rr}")
     regs = rr.registers
@@ -976,6 +978,8 @@ if __name__ == "__main__":
     main()
 ```
 
+> **pymodbus 3.x** — `read_holding_registers(address=0, slave=1)` 형식은 동작하지 않을 수 있다. 위처럼 `read_holding_registers(0, count=3, device_id=...)` 를 쓴다. (구버전 2.x는 `slave=`)
+
 **실행:** 에뮬레이터를 켠 뒤 1~2분 돌리고 `Ctrl+C` 로 종료.
 
 ```powershell
@@ -1005,7 +1009,10 @@ docker exec -it weather-mysql mysql -u weather -pweatherpass -e "USE weather; SE
 | 7 | `panel_temp` | `power_hourly.temperature` |
 | 8 | `panel_humidity` | `power_hourly.humidity` |
 
-LSTM: **과거 35시간** × 위 8개 → 다음 `power_kw` 예측.
+| 모델 | 입력 | 맞출 값 |
+|------|------|---------|
+| **베이스라인** (15절) | 시각 **t** 한 줄의 8 feature (`power_kw` 포함) | 시각 **t+1** `power_kw` |
+| **LSTM** (16절) | 시각 **t−34 ~ t** 까지 35시간 × 8 feature | 시각 **t** `power_kw` (시퀀스 끝 다음) |
 
 ### 13.2 join SQL
 
@@ -1051,6 +1058,9 @@ WHERE w.source = 'public';
 
 14~16절에서 공통으로 쓴다. **15절보다 먼저** 만든다.
 
+- **베이스라인:** `make_baseline_xy` — 시각 t → t+1 `power_kw`
+- **LSTM:** `make_sequences` — 과거 35시간 창
+
 `ml_shared.py` 생성 후 아래 **전체** 붙여넣기:
 
 ```python
@@ -1079,6 +1089,8 @@ FEATURES = [
     "panel_humidity",
 ]
 TARGET = "power_kw"
+# 베이스라인 입력: 시각 t 의 8개 (power_kw 포함) → 시각 t+1 power_kw 예측
+BASELINE_FEATURES = list(FEATURES)
 METRICS_PATH = Path(__file__).with_name("metrics_baseline.json")
 
 
@@ -1128,6 +1140,13 @@ def split_index(n: int, test_ratio: float = TEST_RATIO) -> int:
     return int(n * (1 - test_ratio))
 
 
+def make_baseline_xy(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    """시각 t 의 BASELINE_FEATURES(8) -> 시각 t+1 power_kw."""
+    data = df[BASELINE_FEATURES].astype(float).values
+    y = df[TARGET].astype(float).values
+    return data[:-1], y[1:]
+
+
 def make_sequences(df: pd.DataFrame, seq_len: int = SEQ_LEN):
     data = df[FEATURES].astype(float).values
     scaler = MinMaxScaler()
@@ -1165,6 +1184,9 @@ def load_baseline_metrics() -> dict | None:
 
 ## 15. 베이스라인 — `train_baseline.py`
 
+**역할:** LSTM과 비교할 **단순 모델**. **시각 t** 의 8 feature(그 시각 `power_kw` 포함)로 **한 시간 뒤(t+1)** `power_kw`를 예측한다.  
+(LSTM은 **과거 35시간**을 한꺼번에 본다.)
+
 `train_baseline.py` 생성 후 아래 **전체** 붙여넣기:
 
 ```python
@@ -1175,10 +1197,10 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 from ml_shared import (
-    FEATURES,
+    BASELINE_FEATURES,
     METRICS_PATH,
-    TARGET,
     load_joined,
+    make_baseline_xy,
     require_rows,
     save_baseline_metrics,
     split_index,
@@ -1190,9 +1212,8 @@ def main():
     require_rows(df)
     print(f"[INFO] join 행 수: {len(df)}, 기간: {df['obs_time'].min()} ~ {df['obs_time'].max()}")
 
-    X = df[FEATURES].astype(float).values
-    y = df[TARGET].astype(float).values
-    cut = split_index(len(df))
+    X, y = make_baseline_xy(df)
+    cut = split_index(len(X))
     X_train, X_test = X[:cut], X[cut:]
     y_train, y_test = y[:cut], y[cut:]
 
@@ -1205,7 +1226,11 @@ def main():
     r2 = r2_score(y_test, pred)
     save_baseline_metrics(mae, rmse, r2)
 
-    print("[BASELINE] HistGradientBoosting — 현재 시각 8 feature → power_kw")
+    n_feat = len(BASELINE_FEATURES)
+    print(
+        f"[BASELINE] HistGradientBoosting - 시각 t 의 {n_feat} feature "
+        f"(power_kw 포함, 직전 시각 값) -> 시각 t+1 power_kw"
+    )
     print(f"  test MAE  (kW): {mae:.4f}")
     print(f"  test RMSE (kW): {rmse:.4f}")
     print(f"  test R²:        {r2:.4f}")
@@ -1285,7 +1310,7 @@ def main():
     mae = mean_absolute_error(y_test_kw, pred_kw)
     rmse = float(np.sqrt(mean_squared_error(y_test_kw, pred_kw)))
 
-    print("[LSTM] 과거 35시간 × 8 feature → power_kw")
+    print("[LSTM] 과거 35시간 × 8 feature → power_kw (베이스라인은 t→t+1 1시간만 사용)")
     print(f"  test MAE  (kW): {mae:.4f}")
     print(f"  test RMSE (kW): {rmse:.4f}")
 
@@ -1337,7 +1362,7 @@ weather-lab/     ← git clone
 | `collect_weather.py` | API 원본 JSON 1일 → 파일 (DB 없음) |
 | `collect_weather_backfill.py` | N일(30일≈720행) 수집 |
 | `collect_rp2040_modbus.py` | Modbus 실시간 저장 |
-| `train_baseline.py` | sklearn 베이스라인 |
+| `train_baseline.py` | HistGradientBoosting — t → t+1 `power_kw` |
 | `lstm_train.py` | LSTM + MAE 비교 |
 
 ---
@@ -1354,6 +1379,7 @@ weather-lab/     ← git clone
 | join 행 적음 | 5절 시드, `DEVICE_ID`, `source` 필터 |
 | `power_hourly` ≠ 720 | 5절 SQL import 경로 |
 | Modbus 연결 실패 | `MODBUS_MODE`·RTU: COM 번호 / TCP: Host·Port·에뮬 Listen |
+| `read_holding_registers` 인자 오류 | pymodbus 3.x → `device_id=` (12절), `slave=` 사용 금지 |
 | `MODBUS_MODE` 오류 | `rtu` 또는 `tcp` 만 허용 (대소문자 무관) |
 | TensorFlow 설치 느림 | 15절까지 sklearn만, 16절 전 tensorflow |
 | `[COMPARE]` 없음 | 15절 `train_baseline.py` 먼저 실행 |
