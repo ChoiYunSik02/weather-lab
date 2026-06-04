@@ -1125,20 +1125,15 @@ uv run python lstm_train.py
 ## 17. 파일 목록
 
 ```text
-weather-rp2040-lab-materials/     ← git clone (GitHub 공유)
-  실습매뉴얼_공공데이터_RP2040_MySQL.md
-  .env                              ← 각 PC에서 직접 생성 (Git 제외)
-  pyproject.toml                    ← 6절 uv
-  db.py, weather_sources.py         ← 8~9절
-  collect_weather.py
-  collect_weather_backfill.py
-  collect_rp2040_modbus.py
-  ml_shared.py
-  train_baseline.py
-  lstm_train.py
-  metrics_baseline.json             ← 14절 실행 후 (Git 제외)
-  seed/power_realtime_seed.sql
+weather-rp2040-lab-materials/     ← git clone
+  실습매뉴얼_공공데이터_RP2040_MySQL.md   ← GitHub
+  seed/power_realtime_seed.sql            ← GitHub
   seed/README.md
+  .gitignore
+  .env                    ← 7절 직접 생성 (Git 제외)
+  pyproject.toml          ← 6절
+  db.py … lstm_train.py   ← 8~12, 14~16절 매뉴얼에서 직접 생성
+  metrics_baseline.json   ← 15절 실행 후 (Git 제외)
 ```
 
 저장소: https://github.com/seogilan0/weather-rp2040-lab-materials
