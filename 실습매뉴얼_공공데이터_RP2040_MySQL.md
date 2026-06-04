@@ -24,7 +24,7 @@ PowerShell에서 **위에서 아래 순서대로** 진행한다.
 7. [환경 변수 `.env`](#7-환경-변수-env)  
 8. [`db.py`](#8-dbpy)  
 9. [`weather_sources.py`](#9-weather_sourcespy)  
-10. [기상 수집 v1 — `collect_weather.py`](#10-기상-수집-v1--collect_weatherpy)  
+10. [기상 API JSON 확인 — `collect_weather.py`](#10-기상-api-json-확인--collect_weatherpy)  
 11. [기상 수집 v2 — 30일 backfill](#11-기상-수집-v2--30일-backfill)  
 12. [RP2040 Modbus 저장](#12-rp2040-modbus-저장)  
 13. [join으로 데이터 확인](#13-join으로-데이터-확인)  
@@ -80,7 +80,7 @@ seed/README.md
 |----|------|
 | 8 | `db.py` |
 | 9 | `weather_sources.py` |
-| 10 | `collect_weather.py` |
+| 10 | `collect_weather.py` (API JSON 1일 저장·확인) |
 | 11 | `collect_weather_backfill.py` |
 | 12 | `collect_rp2040_modbus.py` |
 | 14 | `ml_shared.py` |
@@ -461,6 +461,46 @@ def fetch_hourly(source: str, start: date, end: date) -> list[dict[str, Any]]:
     raise ValueError(f"지원하지 않는 WEATHER_SOURCE: {source}")
 
 
+def fetch_api_json(source: str, day: date) -> dict[str, Any]:
+    """API가 돌려준 원본 JSON 1일분 (10절: 파일로 저장·구조 확인용)."""
+    source = source.lower().strip()
+    if source == "public":
+        service_key = os.environ["DATA_GO_KR_SERVICE_KEY"]
+        stn_id = os.getenv("ASOS_STN_ID", "108")
+        ymd = day.strftime("%Y%m%d")
+        params = {
+            "serviceKey": service_key,
+            "pageNo": "1",
+            "numOfRows": "24",
+            "dataType": "JSON",
+            "dataCd": "ASOS",
+            "dateCd": "HR",
+            "startDt": ymd,
+            "startHh": "00",
+            "endDt": ymd,
+            "endHh": "23",
+            "stnIds": stn_id,
+        }
+        r = requests.get(API_PUBLIC_HOURLY, params=params, timeout=30)
+        r.raise_for_status()
+        return r.json()
+    if source == "openmeteo":
+        lat = os.getenv("LAT", "35.95")
+        lon = os.getenv("LON", "126.70")
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "start_date": day.isoformat(),
+            "end_date": day.isoformat(),
+            "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m,shortwave_radiation,precipitation",
+            "timezone": "Asia/Seoul",
+        }
+        r = requests.get(API_OPENMETEO_ARCHIVE, params=params, timeout=60)
+        r.raise_for_status()
+        return r.json()
+    raise ValueError(f"지원하지 않는 WEATHER_SOURCE: {source}")
+
+
 def _fetch_openmeteo(start: date, end: date) -> list[dict[str, Any]]:
     lat = os.getenv("LAT", "35.95")
     lon = os.getenv("LON", "126.70")
@@ -576,67 +616,102 @@ def _num(v):
 
 ---
 
-## 10. 기상 수집 v1 — `collect_weather.py`
+## 10. 기상 API JSON 확인 — `collect_weather.py`
+
+**목적:** API가 주는 **원본 JSON**을 하루치만 받아 **파일로 저장**하고, 구조를 본다.  
+**MySQL에는 아직 넣지 않는다.** (30일 적재는 **11절 backfill**)
+
+> **이전 코드와의 차이**  
+> 예전처럼 `시작일 종료일` 인자로 30일을 넣으면 11절과 같은 일을 하게 된다.  
+> v1은 **날짜 인자 없음** — **어제(기본)** 또는 **`today`(오늘)** 하루만 API 호출 → JSON 파일.
 
 `collect_weather.py` 생성:
 
 ```python
 from __future__ import annotations
 
+import json
 import sys
 from datetime import date, timedelta
+from pathlib import Path
 
 from dotenv import load_dotenv
 
-from db import env, save_weather_hourly
-from weather_sources import fetch_hourly
+from db import env
+from weather_sources import fetch_api_json
 
 
 def main():
     load_dotenv()
     source = env("WEATHER_SOURCE", "public")
 
-    if len(sys.argv) == 3:
-        start = date.fromisoformat(sys.argv[1])
-        end = date.fromisoformat(sys.argv[2])
+    if len(sys.argv) > 1 and sys.argv[1].lower() == "today":
+        target = date.today()
     else:
-        end = date.today() - timedelta(days=1)
-        start = end
+        target = date.today() - timedelta(days=1)
 
-    print(f"[INFO] source={source}, 기간={start}~{end}")
-    rows = fetch_hourly(source, start, end)
-    n = save_weather_hourly(rows)
-    print(f"[OK] weather_hourly 저장 {n}건")
+    print(f"[INFO] source={source}, 날짜={target} (API 원본 JSON)")
+    payload = fetch_api_json(source, target)
+
+    out = Path(f"weather_api_{source}_{target.isoformat()}.json")
+    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[OK] 저장 → {out.resolve()}")
 
 
 if __name__ == "__main__":
     main()
 ```
 
-**실행** (기본: 어제 하루 ≈ 24행):
+**실행**
 
 ```powershell
 cd $HOME\Projects\weather-lab
 uv run python collect_weather.py
 ```
 
-날짜 지정:
+→ 프로젝트 루트에 `weather_api_public_2026-06-04.json` 같은 파일이 생긴다. (날짜·소스는 실행일 기준)
+
+**오늘 날짜로 받기** (공공 API는 당일 데이터가 늦게 올 수 있음):
 
 ```powershell
-uv run python collect_weather.py 2025-05-01 2025-05-01
+uv run python collect_weather.py today
 ```
 
-**확인:**
+**확인:** VS Code·메모장으로 JSON을 연다. `resultCode`·`item` 배열이 보이면 11절로.
 
-```powershell
-docker exec -it weather-mysql mysql -u weather -pweatherpass -e "USE weather; SELECT COUNT(*) FROM weather_hourly; SELECT * FROM weather_hourly ORDER BY obs_time DESC LIMIT 5;"
+### 10.1 JSON이란? (공공 ASOS, `WEATHER_SOURCE=public`)
+
+`weather_sources.py` 안에서 `requests.get(...)` → **`r.json()`** 으로 파이썬 dict가 되고, 10절 스크립트가 그걸 **그대로** 파일에 쓴다.  
+별도 “JSON 다운로드 URL”이 아니라 **API 응답 본문**이 JSON이다.
+
+대략 구조:
+
+```text
+response
+ ├── header     → resultCode "00" 이면 성공
+ └── body
+      └── items
+           └── item[]   → 시간별 관측 (보통 24개 전후)
+                ├── tm   관측 시각
+                ├── ta   기온(°C)
+                ├── hm   습도(%)
+                ├── ws   풍속(m/s)
+                └── rn   강수(mm)
 ```
 
-`COUNT` 가 **24** 전후이면 11절로.
+9절 `save_weather_hourly` 에 넣을 때는 이 `item` 을 읽어 `temperature`·`humidity` 등 **컬럼으로 옮긴다** (11절).  
+`raw_json` 컬럼에는 `item` 한 건을 문자열로 남긴다.
+
+### 10.2 Open-Meteo (`WEATHER_SOURCE=openmeteo`)
+
+파일 최상위에 `hourly` → `time`, `temperature_2m`, … 배열이 있다.  
+구조만 확인한 뒤, **30일 MySQL 적재는 11절**에서 한다.
 
 ---
 
 ## 11. 기상 수집 v2 — 30일 backfill
+
+10절에서 본 API 응답을 `fetch_hourly` 로 **여러 날** 모아 `weather_hourly` 테이블에 넣는다.
 
 `collect_weather_backfill.py` 생성:
 
@@ -1169,7 +1244,7 @@ weather-lab/     ← git clone
 | 파일 | 역할 |
 |------|------|
 | `weather_sources.py` | Open-Meteo / 공공 **시간별** 수집 |
-| `collect_weather.py` | 1일(≈24행) 수집 |
+| `collect_weather.py` | API 원본 JSON 1일 → 파일 (DB 없음) |
 | `collect_weather_backfill.py` | N일(30일≈720행) 수집 |
 | `collect_rp2040_modbus.py` | Modbus 실시간 저장 |
 | `train_baseline.py` | sklearn 베이스라인 |
@@ -1181,7 +1256,8 @@ weather-lab/     ← git clone
 
 | 증상 | 확인·대응 |
 |------|-----------|
-| `weather_hourly` 24행 미만 | 기간·`WEATHER_SOURCE`·공공 API 키 |
+| `weather_api_*.json` 없음 / 오류 | `.env` Decoding 키·네트워크·`resultCode` (10절) |
+| `weather_hourly` 720 미만 | 11절 `collect_weather_backfill.py 30` |
 | Open-Meteo 오류 | `LAT`/`LON`, archive 날짜 범위 |
 | 공공 API 오류 | 활용신청, `dateCd=HR`, Decoding 키 |
 | `solar_radiation` NULL | `public`(ASOS) 기본이면 정상. 일사 필요 시 `WEATHER_SOURCE=openmeteo` 로 전환 |
@@ -1201,7 +1277,7 @@ weather-lab/     ← git clone
 1. uv → Docker MySQL → 테이블  
 2. **시드** `power_realtime_seed.sql`  
 3. 프로젝트 + `.env`  
-4. `db.py` → `weather_sources.py` → v1 → v2 (720)  
+4. `db.py` → `weather_sources.py` → 10절 JSON 확인 → 11절 backfill (720)  
 5. Modbus **짧게** 실행  
 6. join 확인  
 7. `ml_shared.py` → `train_baseline.py` → `lstm_train.py`
