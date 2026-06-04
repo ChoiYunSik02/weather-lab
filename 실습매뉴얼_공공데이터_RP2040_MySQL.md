@@ -23,7 +23,7 @@ PowerShell에서 **위에서 아래 순서대로** 진행한다.
 6. [Python 프로젝트](#6-python-프로젝트)  
 7. [환경 변수 `.env`](#7-환경-변수-env)  
 8. [`db.py`](#8-dbpy)  
-9. [`weather_sources.py`](#9-weather_sourcespy)  
+9. [기상 API — `weather_public.py` / `weather_openmeteo.py`](#9-기상-api--weather_publicpy--weather_openmeteopy)  
 10. [기상 API JSON 확인 — `collect_weather.py`](#10-기상-api-json-확인--collect_weatherpy)  
 11. [기상 수집 v2 — 30일 backfill](#11-기상-수집-v2--30일-backfill)  
 12. [RP2040 Modbus 저장](#12-rp2040-modbus-저장)  
@@ -79,7 +79,7 @@ seed/README.md
 | 절 | 파일 |
 |----|------|
 | 8 | `db.py` |
-| 9 | `weather_sources.py` |
+| 9 | `weather_public.py` (필수), `weather_openmeteo.py` (Open-Meteo 쓸 때만) |
 | 10 | `collect_weather.py` (API JSON 1일 저장·확인) |
 | 11 | `collect_weather_backfill.py` |
 | 12 | `collect_rp2040_modbus.py` |
@@ -431,10 +431,18 @@ def save_weather_hourly(rows: list[dict[str, Any]]) -> int:
 
 ---
 
-## 9. `weather_sources.py`
+## 9. 기상 API — `weather_public.py` / `weather_openmeteo.py`
 
-`weather_sources.py` 를 만들고 아래 **전체**를 붙여 넣는다.  
-공공 ASOS 기본 관측소는 **7절 `ASOS_STN_ID=108`(군산)** 이다.
+한 파일에 두 API를 넣으면 길어져서 **소스별로 나눈다.**  
+수업 기본(`.env` **`WEATHER_SOURCE=public`**)은 **`weather_public.py` 만** 만들어도 10~11절까지 진행할 수 있다.
+
+Open-Meteo를 쓸 때만 **`weather_openmeteo.py`** 를 추가한다.
+
+---
+
+### 9.1 `weather_public.py` (공공데이터 ASOS — 필수)
+
+관측소 기본 **108=군산** (`ASOS_STN_ID`).
 
 ```python
 from __future__ import annotations
@@ -446,137 +454,52 @@ from typing import Any
 
 import requests
 
-API_PUBLIC_HOURLY = (
-    "http://apis.data.go.kr/1360000/AsosHourlyInfoService/getWthrDataList"
-)
-API_OPENMETEO_ARCHIVE = "https://archive-api.open-meteo.com/v1/archive"
+API_URL = "http://apis.data.go.kr/1360000/AsosHourlyInfoService/getWthrDataList"
 
 
-def fetch_hourly(source: str, start: date, end: date) -> list[dict[str, Any]]:
-    source = source.lower().strip()
-    if source == "openmeteo":
-        return _fetch_openmeteo(start, end)
-    if source == "public":
-        return _fetch_public_hourly(start, end)
-    raise ValueError(f"지원하지 않는 WEATHER_SOURCE: {source}")
-
-
-def fetch_api_json(source: str, day: date) -> dict[str, Any]:
-    """API가 돌려준 원본 JSON 1일분 (10절: 파일로 저장·구조 확인용)."""
-    source = source.lower().strip()
-    if source == "public":
-        service_key = os.environ["DATA_GO_KR_SERVICE_KEY"]
-        stn_id = os.getenv("ASOS_STN_ID", "108")
-        ymd = day.strftime("%Y%m%d")
-        params = {
-            "serviceKey": service_key,
-            "pageNo": "1",
-            "numOfRows": "24",
-            "dataType": "JSON",
-            "dataCd": "ASOS",
-            "dateCd": "HR",
-            "startDt": ymd,
-            "startHh": "00",
-            "endDt": ymd,
-            "endHh": "23",
-            "stnIds": stn_id,
-        }
-        r = requests.get(API_PUBLIC_HOURLY, params=params, timeout=30)
-        r.raise_for_status()
-        return r.json()
-    if source == "openmeteo":
-        lat = os.getenv("LAT", "35.95")
-        lon = os.getenv("LON", "126.70")
-        params = {
-            "latitude": lat,
-            "longitude": lon,
-            "start_date": day.isoformat(),
-            "end_date": day.isoformat(),
-            "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m,shortwave_radiation,precipitation",
-            "timezone": "Asia/Seoul",
-        }
-        r = requests.get(API_OPENMETEO_ARCHIVE, params=params, timeout=60)
-        r.raise_for_status()
-        return r.json()
-    raise ValueError(f"지원하지 않는 WEATHER_SOURCE: {source}")
-
-
-def _fetch_openmeteo(start: date, end: date) -> list[dict[str, Any]]:
-    lat = os.getenv("LAT", "35.95")
-    lon = os.getenv("LON", "126.70")
-    location_key = os.getenv("LOCATION_KEY", f"{lat},{lon}")
-
+def fetch_api_json(day: date) -> dict[str, Any]:
+    """API 원본 JSON 1일 (10절)."""
+    service_key = os.environ["DATA_GO_KR_SERVICE_KEY"]
+    stn_id = os.getenv("ASOS_STN_ID", "108")
+    ymd = day.strftime("%Y%m%d")
     params = {
-        "latitude": lat,
-        "longitude": lon,
-        "start_date": start.isoformat(),
-        "end_date": end.isoformat(),
-        "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m,shortwave_radiation,precipitation",
-        "timezone": "Asia/Seoul",
+        "serviceKey": service_key,
+        "pageNo": "1",
+        "numOfRows": "24",
+        "dataType": "JSON",
+        "dataCd": "ASOS",
+        "dateCd": "HR",
+        "startDt": ymd,
+        "startHh": "00",
+        "endDt": ymd,
+        "endHh": "23",
+        "stnIds": stn_id,
     }
-    r = requests.get(API_OPENMETEO_ARCHIVE, params=params, timeout=60)
+    r = requests.get(API_URL, params=params, timeout=30)
     r.raise_for_status()
-    payload = r.json()
-    hourly = payload.get("hourly", {})
-    times = hourly.get("time", [])
-
-    rows: list[dict[str, Any]] = []
-    for i, t in enumerate(times):
-        obs_time = datetime.fromisoformat(t)
-        rows.append(
-            {
-                "obs_time": obs_time,
-                "source": "openmeteo",
-                "location_key": location_key,
-                "temperature": _at(hourly.get("temperature_2m"), i),
-                "humidity": _at(hourly.get("relative_humidity_2m"), i),
-                "wind_speed": _at(hourly.get("wind_speed_10m"), i),
-                "solar_radiation": _at(hourly.get("shortwave_radiation"), i),
-                "precipitation": _at(hourly.get("precipitation"), i),
-                "raw_json": json.dumps({"time": t}, ensure_ascii=False),
-            }
-        )
-    return rows
+    return r.json()
 
 
-def _fetch_public_hourly(start: date, end: date) -> list[dict[str, Any]]:
+def fetch_hourly(start: date, end: date) -> list[dict[str, Any]]:
+    """여러 날 시간별 행 (11절 backfill)."""
     service_key = os.environ["DATA_GO_KR_SERVICE_KEY"]
     stn_id = os.getenv("ASOS_STN_ID", "108")
     location_key = f"stn:{stn_id}"
-
     rows: list[dict[str, Any]] = []
     d = start
     while d <= end:
-        ymd = d.strftime("%Y%m%d")
-        params = {
-            "serviceKey": service_key,
-            "pageNo": "1",
-            "numOfRows": "24",
-            "dataType": "JSON",
-            "dataCd": "ASOS",
-            "dateCd": "HR",
-            "startDt": ymd,
-            "startHh": "00",
-            "endDt": ymd,
-            "endHh": "23",
-            "stnIds": stn_id,
-        }
-        r = requests.get(API_PUBLIC_HOURLY, params=params, timeout=30)
-        r.raise_for_status()
-        data = r.json()
+        data = fetch_api_json(d)
         header = data.get("response", {}).get("header", {})
         if header.get("resultCode") != "00":
             raise RuntimeError(
                 f"공공 API 오류: {header.get('resultCode')} / {header.get('resultMsg')}"
             )
-
         items = data.get("response", {}).get("body", {}).get("items", {}).get("item")
         if not items:
             d += timedelta(days=1)
             continue
         if not isinstance(items, list):
             items = [items]
-
         for item in items:
             tm = item.get("tm")
             obs_time = datetime.strptime(tm, "%Y-%m-%d %H:%M")
@@ -597,33 +520,100 @@ def _fetch_public_hourly(start: date, end: date) -> list[dict[str, Any]]:
     return rows
 
 
-def _at(values, idx):
-    if not values or idx >= len(values):
-        return None
-    v = values[idx]
-    return None if v is None else float(v)
-
-
 def _num(v):
     if v is None or v == "":
         return None
     return float(v)
 ```
 
-공공 API: [ASOS 시간자료](https://www.data.go.kr/data/15057210/openapi.do) 활용신청·**Decoding** 키 필요 (`WEATHER_SOURCE=public`). 관측소 **108=군산** (`.env`의 `ASOS_STN_ID`).
+공공 API: [ASOS 시간자료](https://www.data.go.kr/data/15057210/openapi.do) — 활용신청·**Decoding** 키.
 
-**확인:** 파일 저장 후 10절로.
+---
+
+### 9.2 `weather_openmeteo.py` (선택)
+
+`.env`에서 `WEATHER_SOURCE=openmeteo` 일 때만 추가한다.
+
+```python
+from __future__ import annotations
+
+import json
+import os
+from datetime import date, datetime
+from typing import Any
+
+import requests
+
+API_URL = "https://archive-api.open-meteo.com/v1/archive"
+
+
+def fetch_api_json(day: date) -> dict[str, Any]:
+    lat = os.getenv("LAT", "35.95")
+    lon = os.getenv("LON", "126.70")
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "start_date": day.isoformat(),
+        "end_date": day.isoformat(),
+        "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m,shortwave_radiation,precipitation",
+        "timezone": "Asia/Seoul",
+    }
+    r = requests.get(API_URL, params=params, timeout=60)
+    r.raise_for_status()
+    return r.json()
+
+
+def fetch_hourly(start: date, end: date) -> list[dict[str, Any]]:
+    lat = os.getenv("LAT", "35.95")
+    lon = os.getenv("LON", "126.70")
+    location_key = os.getenv("LOCATION_KEY", f"{lat},{lon}")
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "start_date": start.isoformat(),
+        "end_date": end.isoformat(),
+        "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m,shortwave_radiation,precipitation",
+        "timezone": "Asia/Seoul",
+    }
+    r = requests.get(API_URL, params=params, timeout=60)
+    r.raise_for_status()
+    payload = r.json()
+    hourly = payload.get("hourly", {})
+    times = hourly.get("time", [])
+    rows: list[dict[str, Any]] = []
+    for i, t in enumerate(times):
+        obs_time = datetime.fromisoformat(t)
+        rows.append(
+            {
+                "obs_time": obs_time,
+                "source": "openmeteo",
+                "location_key": location_key,
+                "temperature": _at(hourly.get("temperature_2m"), i),
+                "humidity": _at(hourly.get("relative_humidity_2m"), i),
+                "wind_speed": _at(hourly.get("wind_speed_10m"), i),
+                "solar_radiation": _at(hourly.get("shortwave_radiation"), i),
+                "precipitation": _at(hourly.get("precipitation"), i),
+                "raw_json": json.dumps({"time": t}, ensure_ascii=False),
+            }
+        )
+    return rows
+
+
+def _at(values, idx):
+    if not values or idx >= len(values):
+        return None
+    v = values[idx]
+    return None if v is None else float(v)
+```
+
+**확인:** `weather_public.py` 저장 후 10절로. (Open-Meteo는 9.2까지 만든 뒤 동일하게 진행)
 
 ---
 
 ## 10. 기상 API JSON 확인 — `collect_weather.py`
 
-**목적:** API가 주는 **원본 JSON**을 하루치만 받아 **파일로 저장**하고, 구조를 본다.  
-**MySQL에는 아직 넣지 않는다.** (30일 적재는 **11절 backfill**)
-
-> **이전 코드와의 차이**  
-> 예전처럼 `시작일 종료일` 인자로 30일을 넣으면 11절과 같은 일을 하게 된다.  
-> v1은 **날짜 인자 없음** — **어제(기본)** 또는 **`today`(오늘)** 하루만 API 호출 → JSON 파일.
+**목적:** API **원본 JSON**을 **어제 하루**만 받아 파일로 저장하고 구조를 본다.  
+**인자 없음.** MySQL 적재는 **11절**에서 한다.
 
 `collect_weather.py` 생성:
 
@@ -631,28 +621,28 @@ def _num(v):
 from __future__ import annotations
 
 import json
-import sys
 from datetime import date, timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 from db import env
-from weather_sources import fetch_api_json
 
 
 def main():
     load_dotenv()
-    source = env("WEATHER_SOURCE", "public")
+    source = env("WEATHER_SOURCE", "public").lower().strip()
+    target = date.today() - timedelta(days=1)
 
-    if len(sys.argv) > 1 and sys.argv[1].lower() == "today":
-        target = date.today()
+    if source == "public":
+        from weather_public import fetch_api_json
+    elif source == "openmeteo":
+        from weather_openmeteo import fetch_api_json
     else:
-        target = date.today() - timedelta(days=1)
+        raise ValueError("WEATHER_SOURCE는 public 또는 openmeteo")
 
-    print(f"[INFO] source={source}, 날짜={target} (API 원본 JSON)")
-    payload = fetch_api_json(source, target)
-
+    print(f"[INFO] source={source}, 날짜={target}")
+    payload = fetch_api_json(target)
     out = Path(f"weather_api_{source}_{target.isoformat()}.json")
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[OK] 저장 → {out.resolve()}")
@@ -669,19 +659,13 @@ cd $HOME\Projects\weather-lab
 uv run python collect_weather.py
 ```
 
-→ 프로젝트 루트에 `weather_api_public_2026-06-04.json` 같은 파일이 생긴다. (날짜·소스는 실행일 기준)
+→ `weather_api_public_YYYY-MM-DD.json` 생성 (실행일 기준 **어제** 날짜).
 
-**오늘 날짜로 받기** (공공 API는 당일 데이터가 늦게 올 수 있음):
-
-```powershell
-uv run python collect_weather.py today
-```
-
-**확인:** VS Code·메모장으로 JSON을 연다. `resultCode`·`item` 배열이 보이면 11절로.
+**확인:** JSON을 연다. `resultCode`·`item` 이 보이면 11절로.
 
 ### 10.1 JSON이란? (공공 ASOS, `WEATHER_SOURCE=public`)
 
-`weather_sources.py` 안에서 `requests.get(...)` → **`r.json()`** 으로 파이썬 dict가 되고, 10절 스크립트가 그걸 **그대로** 파일에 쓴다.  
+`weather_public.py` 에서 `requests.get(...)` → **`r.json()`** → 10절에서 **파일로 저장**.  
 별도 “JSON 다운로드 URL”이 아니라 **API 응답 본문**이 JSON이다.
 
 대략 구조:
@@ -711,7 +695,7 @@ response
 
 ## 11. 기상 수집 v2 — 30일 backfill
 
-10절에서 본 API 응답을 `fetch_hourly` 로 **여러 날** 모아 `weather_hourly` 테이블에 넣는다.
+10절 JSON과 같은 API로 **30일치**를 모아 `weather_hourly` 에 넣는다. (9.1 또는 9.2 모듈 사용)
 
 `collect_weather_backfill.py` 생성:
 
@@ -724,19 +708,25 @@ from datetime import date, timedelta
 from dotenv import load_dotenv
 
 from db import env, save_weather_hourly
-from weather_sources import fetch_hourly
 
 
 def main():
     load_dotenv()
-    source = env("WEATHER_SOURCE", "public")
+    source = env("WEATHER_SOURCE", "public").lower().strip()
 
     days = int(sys.argv[1]) if len(sys.argv) > 1 else 30
     end = date.today() - timedelta(days=1)
     start = end - timedelta(days=days - 1)
 
+    if source == "public":
+        from weather_public import fetch_hourly
+    elif source == "openmeteo":
+        from weather_openmeteo import fetch_hourly
+    else:
+        raise ValueError("WEATHER_SOURCE는 public 또는 openmeteo")
+
     print(f"[INFO] backfill {days}일: {start}~{end}, source={source}")
-    rows = fetch_hourly(source, start, end)
+    rows = fetch_hourly(start, end)
     n = save_weather_hourly(rows)
     print(f"[OK] 저장 {n}건 (목표 약 {days * 24}건)")
 
@@ -1243,7 +1233,8 @@ weather-lab/     ← git clone
 
 | 파일 | 역할 |
 |------|------|
-| `weather_sources.py` | Open-Meteo / 공공 **시간별** 수집 |
+| `weather_public.py` | 공공 ASOS API (JSON·시간별) |
+| `weather_openmeteo.py` | Open-Meteo (선택) |
 | `collect_weather.py` | API 원본 JSON 1일 → 파일 (DB 없음) |
 | `collect_weather_backfill.py` | N일(30일≈720행) 수집 |
 | `collect_rp2040_modbus.py` | Modbus 실시간 저장 |
@@ -1277,7 +1268,7 @@ weather-lab/     ← git clone
 1. uv → Docker MySQL → 테이블  
 2. **시드** `power_realtime_seed.sql`  
 3. 프로젝트 + `.env`  
-4. `db.py` → `weather_sources.py` → 10절 JSON 확인 → 11절 backfill (720)  
+4. `db.py` → `weather_public.py` → 10절 JSON → 11절 backfill (720)  
 5. Modbus **짧게** 실행  
 6. join 확인  
 7. `ml_shared.py` → `train_baseline.py` → `lstm_train.py`
